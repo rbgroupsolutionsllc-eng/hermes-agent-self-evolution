@@ -19,6 +19,9 @@ datasets/**/*.json
 snapshots/
 *.pkl
 
+# Generated tool evolution output artifacts (baselines, diffs, datasets, decisions)
+output/
+
 # IDE
 .idea/
 .vscode/
