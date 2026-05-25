@@ -745,3 +745,135 @@ def save_tool_description(
 
     result["success"] = True
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3C — Function-body write pipeline
+# ---------------------------------------------------------------------------
+
+def _find_function_definition(source: str, function_name: str) -> tuple[int, int]:
+    """Locate a module-level function by name and return (start, end) char positions.
+
+    start = position of the 'd' in 'def function_name'
+    end   = position of the first char of the NEXT top-level def/class/decorator
+            (i.e. source[start:end] is the full function text + trailing blank lines)
+
+    Raises ValueError if the function is not found or found more than once.
+    """
+    import re as _re
+    func_pattern = _re.compile(
+        rf"^def {_re.escape(function_name)}\b",
+        _re.MULTILINE,
+    )
+    matches = list(func_pattern.finditer(source))
+    if len(matches) == 0:
+        raise ValueError(f"Function '{function_name}' not found in source")
+    if len(matches) > 1:
+        raise ValueError(
+            f"Function '{function_name}' found {len(matches)} times — ambiguous"
+        )
+
+    start = matches[0].start()
+
+    # Find next top-level symbol (def / class / decorator) after `start`
+    next_toplevel = _re.compile(r"^(?:def |class |@[a-zA-Z_])", _re.MULTILINE)
+    m = next_toplevel.search(source, start + 1)
+    end = m.start() if m is not None else len(source)
+
+    return start, end
+
+
+def _render_delegate_description_function(candidate_template: str) -> str:
+    """Render a replacement Python function body for _build_top_level_description().
+
+    Validates that candidate_template contains {max_children} and {nesting_clause}
+    placeholders, then returns a complete, syntactically valid Python function
+    that:
+      - reads max_children, max_depth, orchestrator_on from the same config
+        reader calls as the original (_get_max_concurrent_children, etc.)
+      - implements 3 nesting_clause branches:
+          orchestrator disabled  → "Orchestrator disabled."
+          depth <= 1             → "Nesting OFF (depth={max_depth})."
+          depth > 1              → "Nesting ON (depth={max_depth})."
+      - returns the candidate_B text with {max_children} and {nesting_clause}
+        injected as f-string values
+    Raises ValueError if required placeholders are missing from candidate_template.
+    """
+    required = ["{max_children}", "{nesting_clause}"]
+    missing = [p for p in required if p not in candidate_template]
+    if missing:
+        raise ValueError(
+            f"candidate_template missing required placeholders: {missing}"
+        )
+
+    # Split the candidate_B text around the two dynamic placeholders so we can
+    # emit them as f-string interpolations.
+    # Expected tail: "{max_children} parallel max. {nesting_clause} Pass context..."
+    # We render the whole return as a single f-string.
+
+    # Escape backslashes and double-quotes that would break the f-string literal.
+    # The candidate_B text uses → (U+2192) which is fine in UTF-8 source.
+    # We emit the string parts as escaped Python string concatenation.
+
+    # Build the rendered function as a text block.
+    fn = '''\
+def _build_top_level_description() -> str:
+    """Compose the delegate_task tool description with current runtime limits."""
+    try:
+        max_children = _get_max_concurrent_children()
+    except Exception:
+        max_children = _DEFAULT_MAX_CONCURRENT_CHILDREN
+    try:
+        max_depth = _get_max_spawn_depth()
+    except Exception:
+        max_depth = MAX_DEPTH
+    try:
+        orchestrator_on = _get_orchestrator_enabled()
+    except Exception:
+        orchestrator_on = True
+
+    if not orchestrator_on:
+        nesting_clause = "Orchestrator disabled."
+    elif max_depth <= 1:
+        nesting_clause = f"Nesting OFF (depth={max_depth})."
+    else:
+        nesting_clause = f"Nesting ON (depth={max_depth})."
+
+    return (
+        "Spawn subagents for isolated reasoning, research, or parallel work. "
+        "Only final summaries return to your context.\\n\\n"
+        "WHEN TO USE: analysis flooding context; code review/debugging; "
+        "research synthesis; parallel independent subtasks.\\n\\n"
+        "WHEN NOT TO USE:\\n"
+        "- Shell/terminal commands -> terminal\\n"
+        "- Save/recall/forget preferences -> memory\\n"
+        "- View/create/edit/install skills -> skill tools\\n"
+        "- Search past conversation -> session_search\\n"
+        "- Ask user for missing input -> clarify\\n"
+        "- Destructive ops, secrets, prod writes, unreviewed pushes -> BLOCKED\\n\\n"
+        f"{max_children} parallel max. {nesting_clause} "
+        "Pass context explicitly. Verify side-effects - summaries are SELF-REPORTS."
+    )
+'''
+    return fn
+
+
+def _write_function_body_to_text(
+    source: str,
+    function_name: str,
+    new_function_text: str,
+) -> str:
+    """Replace a module-level function's complete block with new_function_text.
+
+    Locates function_name via _find_function_definition(), replaces
+    source[start:end] with new_function_text, and returns the new source string.
+    The caller is responsible for py_compile validation before writing to disk.
+    """
+    start, end = _find_function_definition(source, function_name)
+    # Preserve trailing blank lines between functions: new_function_text must
+    # end with a single newline; we keep whatever blank lines were in source[end-?:end].
+    # Since source[start:end] includes trailing blank lines up to the next symbol,
+    # and new_function_text ends with '\n', we append '\n\n' to match PEP-8 spacing.
+    if not new_function_text.endswith("\n"):
+        new_function_text += "\n"
+    return source[:start] + new_function_text + "\n\n" + source[end:]
